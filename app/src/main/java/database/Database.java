@@ -1,17 +1,22 @@
 package database;
 
 import android.content.Context;
-import android.support.annotation.NonNull;
+
+import androidx.annotation.NonNull;
+
 import android.util.Log;
 
-import com.google.firebase.auth.FirebaseAuth;
-import com.google.firebase.auth.FirebaseUser;
+import com.google.android.gms.tasks.OnFailureListener;
+import com.google.android.gms.tasks.OnSuccessListener;
+import com.google.firebase.FirebaseApp;
 import com.google.firebase.database.DataSnapshot;
 import com.google.firebase.database.DatabaseError;
 import com.google.firebase.database.DatabaseReference;
 import com.google.firebase.database.FirebaseDatabase;
-import com.google.firebase.database.Query;
 import com.google.firebase.database.ValueEventListener;
+import com.google.firebase.nongmsauth.FirebaseRestAuth;
+import com.google.firebase.nongmsauth.FirebaseRestAuthUser;
+import com.google.firebase.nongmsauth.api.types.identitytoolkit.SignInAnonymouslyResponse;
 
 import java.util.HashMap;
 
@@ -25,10 +30,9 @@ import vendetta.androidbenchmark.ScoreActivity;
 public class Database {
     private static final String TAG = "Database";
     private static String uid = null;
-    protected static FirebaseAuth mAuth = null;
+    protected static FirebaseRestAuth mAuth = null;
     private static FirebaseDatabase database = null;
     private static DatabaseReference databaseUserScoreRef;
-    private static FirebaseAuth.AuthStateListener mAuthListener;
     private static UserScores dbUserScores = new UserScores(true);
     private static Context mainActivityContext;
     private static HashMap<String, String> results;
@@ -45,32 +49,41 @@ public class Database {
 
     private static void initialize(Context context) {
         mainActivityContext = context;
-        mAuth = FirebaseAuth.getInstance();
-        mAuthListener = new FirebaseAuth.AuthStateListener() {
+        FirebaseApp mApp = FirebaseApp.getInstance();
+        mAuth = FirebaseRestAuth.Companion.getInstance(mApp);
+        FirebaseRestAuthUser user = mAuth.getCurrentUser();
+
+        if (user != null) {
+            uid = user.getUserId();
+            Log.d(TAG, uid + "connected");
+        }
+        // User is signed in
+        if (uid != null) {
+            Log.d(TAG, "User " + uid + " is logged in!");
+            if (database == null) {
+                FirebaseDatabase.getInstance().setPersistenceEnabled(true);
+                database = FirebaseDatabase.getInstance();
+                database.getReference().child("benchmarks").keepSynced(true);
+            }
+            updateUserScores();
+            Log.d(TAG, "onAuthStateChanged:signed_in:" + uid);
+        }
+
+        mAuth.signInAnonymously().addOnSuccessListener(new OnSuccessListener<SignInAnonymouslyResponse>() {
             @Override
-            public void onAuthStateChanged(@NonNull FirebaseAuth firebaseAuth) {
-                FirebaseUser user = firebaseAuth.getCurrentUser();
-                if (user != null) {
-                    uid = user.getUid();
-                    Log.d(TAG, uid + "connected");
-                }
-                // User is signed in
-                if (uid != null) {
-                    Log.d(TAG, "User " + uid + " is logged in!");
-                    if (database == null) {
-                        FirebaseDatabase.getInstance().setPersistenceEnabled(true);
-                        database = FirebaseDatabase.getInstance();
-                        database.getReference().child("benchmarks").keepSynced(true);
-                    }
-                    updateUserScores();
-                    Log.d(TAG, "onAuthStateChanged:signed_in:" + uid);
-                } else {
-                    Log.d(TAG, "onAuthStateChanged:signed_out");
-                    mAuth.signInAnonymously();
+            public void onSuccess(SignInAnonymouslyResponse signInAnonymouslyResponse) {
+                if (database == null) {
+                    FirebaseDatabase.getInstance().setPersistenceEnabled(true);
+                    database = FirebaseDatabase.getInstance();
+                    database.getReference().child("benchmarks").keepSynced(true);
                 }
             }
-        };
-        mAuth.addAuthStateListener(mAuthListener);
+        }).addOnFailureListener(new OnFailureListener() {
+            @Override
+            public void onFailure(@NonNull Exception e) {
+
+            }
+        });
     }
 
     private static void updateUserScores() {
@@ -83,6 +96,9 @@ public class Database {
                     dbUserScores.updateAll(tmp);
                 MainActivity.updateScores(dbUserScores, mainActivityContext);
                 Log.d(TAG, "UserScores read from DB");
+                if (database != null) {
+                    database.goOffline();
+                }
             }
 
             @Override
@@ -94,6 +110,7 @@ public class Database {
 
     public static void postBenchScore(Score score) {
         score.setUid(uid);
+        database.goOffline();
         database.getReference().child("benchmarks").child(score.getBenchName()).child(uid).setValue(score);
         databaseUserScoreRef.updateChildren(score.toMap());
         Log.d("DB ", "posted " + score.toString());
@@ -103,8 +120,10 @@ public class Database {
         database.getReference().child("benchmarks").child(benchmarkName).child(uid).addListenerForSingleValueEvent(new ValueEventListener() {
             @Override
             public void onDataChange(DataSnapshot dataSnapshot) {
-                ScoreActivity.updateResult(dataSnapshot.getValue(Score.class));
-                Log.d(TAG, "BenchmarkScore read from DB");
+                if (dataSnapshot.getValue() != null) {
+                    ScoreActivity.updateResult(dataSnapshot.getValue(Score.class));
+                    Log.d(TAG, "BenchmarkScore read from DB");
+                }
             }
 
             @Override
@@ -122,12 +141,16 @@ public class Database {
                 int entries = 0;
                 for (DataSnapshot data : dataSnapshot.getChildren()) {
                     entries++;
-                    Score tempScore = data.getValue(Score.class);
-                    if (results.get(tempScore.getDevice()) == null || Long.parseLong(results.get(tempScore.getDevice())) < Long.parseLong(tempScore.getResult()))
-                        results.put(tempScore.getDevice(), tempScore.getResult());
+                    try {
+                        Score tempScore = data.getValue(Score.class);
+                        if (results.get(tempScore.getDevice()) == null || Long.parseLong(results.get(tempScore.getDevice())) < Long.parseLong(tempScore.getResult()))
+                            results.put(tempScore.getDevice(), tempScore.getResult());
+                    } catch (com.google.firebase.database.DatabaseException e) {
+                        Log.d(TAG, "Could not convert: " +  e.getMessage());
+                    }
                 }
 
-                Log.d(TAG, "total entries: "+entries);
+                Log.d(TAG, "total entries: " + entries);
                 ScoreActivity.updateRanking(results, rankContext);
                 Log.d(TAG, "Rankings read from DB");
             }
@@ -140,7 +163,7 @@ public class Database {
 
     }
 
-    public static Context getContext(){
+    public static Context getContext() {
         return mainActivityContext;
     }
 
